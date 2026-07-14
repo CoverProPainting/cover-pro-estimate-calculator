@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cover Pro Painting — Exterior Estimator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useEffect } = React;
+
+// ─── Pricing constants (edit these as rates change) ─────────────────────────
+const PREP_RATES = [
+  { id: "easy", label: "Easy / Light", rate: 3.25, note: "Sound surfaces, minimal scraping" },
+  { id: "medium", label: "Medium / Heavy", rate: 4.25, note: "Moderate scraping, caulking, patching" },
+  { id: "heavy", label: "Heavy / Excessive", rate: 5.25, note: "Extensive failure, heavy scrape & prime" },
+];
+const TRIM_RATE = 3.5;
+const STORY_ADJ = { 1: 0, 2: 0.1, 3: 0.2 };
+const COVERAGE_SQFT_PER_GALLON = 300;
+const COATS = 2;
+const PAINTS = [
+  { id: "superpaint", name: "SW SuperPaint", tier: "Standard — included", costPerGal: 35 },
+  { id: "duration", name: "SW Duration", tier: "Upgrade 1", costPerGal: 45 },
+  { id: "emerald", name: "SW Emerald Rain Refresh", tier: "Upgrade 2", costPerGal: 68 },
+];
+const DOOR_PRICE = 249;
+const HISTORY_KEY = "coverpro-history";
+
+const fmt = (n) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+const fmtCents = (n) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
+
+// localStorage helpers — guarded so the app still runs if storage is blocked
+function loadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+function persistHistory(list) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+  } catch (e) {
+    /* storage unavailable — history is session-only */
+  }
+}
+function wipeHistory() {
+  try {
+    localStorage.removeItem(HISTORY_KEY);
+  } catch (e) {}
+}
+
+function fallbackCopy(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand("copy");
+    done();
+  } catch (e) {}
+  document.body.removeChild(ta);
+}
+
+function Section({ eyebrow, title, children, right }) {
+  return (
+    <section className="border-b border-slate-200 py-6">
+      <div className="flex items-baseline justify-between mb-4">
+        <div>
+          <div className="text-xs font-semibold tracking-widest uppercase text-blue-700">{eyebrow}</div>
+          <h2 className="text-lg font-bold text-slate-900">{title}</h2>
+        </div>
+        {right}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function NumField({ label, unit, value, onChange, required, placeholder }) {
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-slate-700 flex items-center gap-1">
+        {label}
+        {required && <span className="text-blue-600">*</span>}
+      </span>
+      <div className="mt-1 flex items-center rounded-lg border border-slate-300 bg-white overflow-hidden focus-within:ring-2 focus-within:ring-blue-500">
+        <input
+          type="number"
+          inputMode="decimal"
+          min="0"
+          value={value}
+          placeholder={placeholder || "0"}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full px-3 py-2.5 text-base text-slate-900 outline-none"
+        />
+        {unit && (
+          <span className="px-3 text-sm text-slate-500 bg-slate-50 self-stretch flex items-center border-l border-slate-200">
+            {unit}
+          </span>
+        )}
+      </div>
+    </label>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <div className="flex justify-between py-1">
+      <span className="text-slate-300">{label}</span>
+      <span className="font-semibold">{value}</span>
+    </div>
+  );
+}
+
+function CoverProEstimator() {
+  const [customer, setCustomer] = useState({ address: "", job: "" });
+  const [houseSqft, setHouseSqft] = useState("");
+  const [wallSqft, setWallSqft] = useState("");
+  const [trimLf, setTrimLf] = useState("");
+  const [stories, setStories] = useState(null);
+  const [prep, setPrep] = useState(null);
+  const [paint, setPaint] = useState("superpaint");
+  const [doorQty, setDoorQty] = useState("");
+  const [customItems, setCustomItems] = useState([]);
+  const [draft, setDraft] = useState({ name: "", desc: "", qty: "", price: "" });
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copiedCustomer, setCopiedCustomer] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [history, setHistory] = useState([]);
+
+  useEffect(() => {
+    setHistory(loadHistory());
+  }, []);
+
+  const missingFields = useMemo(() => {
+    const m = [];
+    if (!houseSqft) m.push("House sq ft");
+    if (!wallSqft) m.push("Wall sq ft");
+    if (trimLf === "") m.push("Trim linear ft");
+    if (!stories) m.push("Stories");
+    if (!prep) m.push("Prep level");
+    return m;
+  }, [houseSqft, wallSqft, trimLf, stories, prep]);
+
+  const calc = useMemo(() => {
+    if (missingFields.length > 0) return null;
+    const wall = parseFloat(wallSqft) || 0;
+    const trim = parseFloat(trimLf) || 0;
+    const prepRate = PREP_RATES.find((p) => p.id === prep).rate;
+
+    const body = wall * prepRate;
+    const trimTotal = trim * TRIM_RATE;
+    const adjPct = STORY_ADJ[stories];
+    const storyAdj = (body + trimTotal) * adjPct;
+    const adjustedBase = body + trimTotal + storyAdj;
+
+    const gallonsPerCoat = Math.ceil(wall / COVERAGE_SQFT_PER_GALLON);
+    const totalGallons = gallonsPerCoat * COATS;
+    const selectedPaint = PAINTS.find((p) => p.id === paint);
+    const upgradeDiff = selectedPaint.costPerGal - PAINTS[0].costPerGal;
+    const paintUpgrade = totalGallons * upgradeDiff * 2;
+
+    const doors = (parseInt(doorQty) || 0) * DOOR_PRICE;
+    const customTotal = customItems.reduce(
+      (sum, it) => sum + (parseFloat(it.price) || 0) * (parseInt(it.qty) || 1),
+      0
+    );
+
+    return {
+      body, trimTotal, adjPct, storyAdj, adjustedBase,
+      gallonsPerCoat, totalGallons, selectedPaint, paintUpgrade,
+      doors, customTotal,
+      grandTotal: adjustedBase + paintUpgrade + doors + customTotal,
+    };
+  }, [missingFields, wallSqft, trimLf, stories, prep, paint, doorQty, customItems]);
+
+  const addCustomItem = () => {
+    if (!draft.name || !draft.price) return;
+    setCustomItems([...customItems, { ...draft, id: Date.now() }]);
+    setDraft({ name: "", desc: "", qty: "", price: "" });
+  };
+  const removeItem = (id) => setCustomItems(customItems.filter((it) => it.id !== id));
+
+  const copySummary = () => {
+    if (!calc) return;
+    const prepInfo = PREP_RATES.find((p) => p.id === prep);
+    const lines = [
+      "COVER PRO PAINTING — EXTERIOR ESTIMATE",
+      `Date: ${new Date().toLocaleDateString()}`,
+      customer.address && `Address: ${customer.address}`,
+      customer.job && `Job: ${customer.job}`,
+      "",
+      `House: ${Number(houseSqft).toLocaleString()} sq ft · ${stories} story`,
+      `Body: ${Number(wallSqft).toLocaleString()} sq ft × $${prepInfo.rate.toFixed(2)} (${prepInfo.label} prep) = ${fmtCents(calc.body)}`,
+      `Trim: ${Number(trimLf).toLocaleString()} lf × $${TRIM_RATE.toFixed(2)} = ${fmtCents(calc.trimTotal)}`,
+      calc.adjPct > 0 && `Story adjustment (+${calc.adjPct * 100}%): ${fmtCents(calc.storyAdj)}`,
+      `Paint: ${calc.selectedPaint.name} — ${calc.totalGallons} gal (${COATS} coats)` +
+        (calc.paintUpgrade > 0 ? ` — upgrade ${fmtCents(calc.paintUpgrade)}` : " (standard, included)"),
+      calc.doors > 0 && `Exterior doors: ${parseInt(doorQty)} × ${fmt(DOOR_PRICE)} = ${fmtCents(calc.doors)}`,
+      ...customItems.map(
+        (it) =>
+          `${it.name}${parseInt(it.qty) > 1 ? ` × ${it.qty}` : ""}${it.desc ? ` (${it.desc})` : ""}: ${fmtCents(
+            (parseFloat(it.price) || 0) * (parseInt(it.qty) || 1)
+          )}`
+      ),
+      "",
+      `TOTAL: ${fmt(calc.grandTotal)}`,
+    ].filter(Boolean);
+    const text = lines.join("\n");
+    const done = () => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    } else {
+      fallbackCopy(text, done);
+    }
+  };
+
+  const copyCustomerSummary = () => {
+    if (!calc) return;
+    // Rolled-up, customer-safe line items. No rates, footage, or prep levels.
+    const exteriorPaint = calc.adjustedBase + calc.paintUpgrade;
+    const lines = [
+      `Exterior Paint (${calc.selectedPaint.name}) — ${fmt(exteriorPaint)}`,
+      calc.doors > 0 && `Exterior Doors (${parseInt(doorQty)} × ${fmt(DOOR_PRICE)}) — ${fmt(calc.doors)}`,
+      ...customItems.map(
+        (it) =>
+          `${it.name}${parseInt(it.qty) > 1 ? ` (${it.qty})` : ""} — ${fmt(
+            (parseFloat(it.price) || 0) * (parseInt(it.qty) || 1)
+          )}`
+      ),
+      "",
+      `Total — ${fmt(calc.grandTotal)}`,
+    ].filter((l) => l !== false && l !== null && l !== undefined);
+    const text = lines.join("\n");
+    const done = () => {
+      setCopiedCustomer(true);
+      setTimeout(() => setCopiedCustomer(false), 2000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    } else {
+      fallbackCopy(text, done);
+    }
+  };
+
+  const saveEstimate = () => {
+    if (!calc) return;
+    const entry = {
+      id: Date.now(),
+      date: new Date().toLocaleDateString(),
+      name: customer.job || customer.address || "Unnamed job",
+      address: customer.address || "",
+      stories,
+      wallSqft,
+      gallons: calc.totalGallons,
+      paintName: calc.selectedPaint.name,
+      total: calc.grandTotal,
+    };
+    const next = [entry, ...history].slice(0, 10);
+    setHistory(next);
+    persistHistory(next);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    wipeHistory();
+  };
+
+  const clearAll = () => {
+    setCustomer({ address: "", job: "" });
+    setHouseSqft("");
+    setWallSqft("");
+    setTrimLf("");
+    setStories(null);
+    setPrep(null);
+    setPaint("superpaint");
+    setDoorQty("");
+    setCustomItems([]);
+    setDraft({ name: "", desc: "", qty: "", price: "" });
+    setBreakdownOpen(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 font-sans pb-40">
+      <header className="bg-slate-900 text-white">
+        <div className="max-w-2xl mx-auto px-4 py-5 flex items-center justify-between">
+          <div>
+            <div className="text-xs tracking-widest uppercase text-blue-400 font-semibold">Cover Pro Painting</div>
+            <h1 className="text-xl font-bold">Exterior Estimator</h1>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-400">V1.0</span>
+            <button
+              onClick={clearAll}
+              className="px-4 py-2 rounded-lg border border-slate-600 text-sm font-semibold text-slate-200 hover:bg-slate-800 hover:border-slate-500"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-2xl mx-auto px-4">
+        <Section
+          eyebrow="Customer"
+          title="Job information"
+          right={<span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-medium">DripJobs sync — coming in V2</span>}
+        >
+          <div className="grid gap-3">
+            <input
+              className="rounded-lg border border-slate-300 px-3 py-2.5 bg-white text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Property address"
+              value={customer.address}
+              onChange={(e) => setCustomer({ ...customer, address: e.target.value })}
+            />
+            <input
+              className="rounded-lg border border-slate-300 px-3 py-2.5 bg-white text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Job name / number"
+              value={customer.job}
+              onChange={(e) => setCustomer({ ...customer, job: e.target.value })}
+            />
+          </div>
+        </Section>
+
+        <Section eyebrow="Step 1" title="Measurements">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <NumField label="House square footage" unit="sq ft" value={houseSqft} onChange={setHouseSqft} required />
+            <NumField label="Exterior wall (body)" unit="sq ft" value={wallSqft} onChange={setWallSqft} required />
+            <NumField label="Exterior trim" unit="lin ft" value={trimLf} onChange={setTrimLf} required />
+            <div>
+              <span className="text-sm font-medium text-slate-700 flex items-center gap-1">
+                Stories <span className="text-blue-600">*</span>
+              </span>
+              <div className="mt-1 grid grid-cols-3 gap-2">
+                {[1, 2, 3].map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setStories(s)}
+                    className={`py-2.5 rounded-lg border text-sm font-semibold transition-colors ${
+                      stories === s
+                        ? "bg-blue-600 border-blue-600 text-white"
+                        : "bg-white border-slate-300 text-slate-700 hover:border-blue-400"
+                    }`}
+                  >
+                    {s} Story
+                    <div className={`text-xs font-normal ${stories === s ? "text-blue-100" : "text-slate-500"}`}>
+                      +{STORY_ADJ[s] * 100}%
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </Section>
+
+        <Section eyebrow="Step 2" title="Prep level">
+          <div className="grid gap-2">
+            {PREP_RATES.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPrep(p.id)}
+                className={`flex items-center justify-between rounded-lg border px-4 py-3 text-left transition-colors ${
+                  prep === p.id
+                    ? "bg-blue-600 border-blue-600 text-white"
+                    : "bg-white border-slate-300 text-slate-800 hover:border-blue-400"
+                }`}
+              >
+                <div>
+                  <div className="font-semibold">{p.label}</div>
+                  <div className={`text-xs ${prep === p.id ? "text-blue-100" : "text-slate-500"}`}>{p.note}</div>
+                </div>
+                <div className={`font-mono font-bold ${prep === p.id ? "text-white" : "text-slate-900"}`}>
+                  ${p.rate.toFixed(2)}<span className="text-xs font-normal">/sq ft</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-slate-500">Trim priced separately at ${TRIM_RATE.toFixed(2)}/lin ft — paint and standard prep included.</p>
+        </Section>
+
+        <Section eyebrow="Step 3" title="Paint system">
+          <div className="grid gap-2">
+            {PAINTS.map((p) => {
+              const gallons = calc ? calc.totalGallons : null;
+              const upgrade = gallons !== null ? gallons * (p.costPerGal - PAINTS[0].costPerGal) * 2 : null;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => setPaint(p.id)}
+                  className={`flex items-center justify-between rounded-lg border px-4 py-3 text-left transition-colors ${
+                    paint === p.id
+                      ? "bg-blue-600 border-blue-600 text-white"
+                      : "bg-white border-slate-300 text-slate-800 hover:border-blue-400"
+                  }`}
+                >
+                  <div>
+                    <div className={`text-xs uppercase tracking-wide font-semibold ${paint === p.id ? "text-blue-200" : "text-blue-700"}`}>{p.tier}</div>
+                    <div className="font-semibold">{p.name}</div>
+                  </div>
+                  <div className={`font-mono font-bold text-right ${paint === p.id ? "text-white" : "text-slate-900"}`}>
+                    {p.costPerGal === 35 ? "Included" : upgrade !== null ? `+${fmt(upgrade)}` : `$${p.costPerGal}/gal`}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          {calc && (
+            <div className="mt-3 rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-sm text-slate-700 flex justify-between">
+              <span>Estimated body paint ({COATS} coats @ {COVERAGE_SQFT_PER_GALLON} sq ft/gal)</span>
+              <span className="font-mono font-semibold text-slate-900">{calc.gallonsPerCoat} gal/coat · {calc.totalGallons} gal total</span>
+            </div>
+          )}
+        </Section>
+
+        <Section eyebrow="Step 4" title="Add-ons">
+          <div className="flex items-center justify-between rounded-lg bg-white border border-slate-300 px-4 py-3">
+            <div>
+              <div className="font-semibold text-slate-800">Exterior doors</div>
+              <div className="text-xs text-slate-500">{fmt(DOOR_PRICE)} per door</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setDoorQty(String(Math.max(0, (parseInt(doorQty) || 0) - 1)))}
+                className="w-9 h-9 rounded-lg border border-slate-300 text-slate-700 font-bold hover:border-blue-400"
+              >−</button>
+              <span className="w-8 text-center font-mono font-bold text-slate-900">{parseInt(doorQty) || 0}</span>
+              <button
+                onClick={() => setDoorQty(String((parseInt(doorQty) || 0) + 1))}
+                className="w-9 h-9 rounded-lg border border-slate-300 text-slate-700 font-bold hover:border-blue-400"
+              >+</button>
+            </div>
+          </div>
+
+          {customItems.length > 0 && (
+            <div className="mt-3 grid gap-2">
+              {customItems.map((it) => (
+                <div key={it.id} className="flex items-center justify-between rounded-lg bg-white border border-slate-300 px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-800 truncate">
+                      {it.name}
+                      {parseInt(it.qty) > 1 && <span className="text-slate-500 font-normal"> × {it.qty}</span>}
+                    </div>
+                    {it.desc && <div className="text-xs text-slate-500 truncate">{it.desc}</div>}
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="font-mono font-bold text-slate-900">
+                      {fmtCents((parseFloat(it.price) || 0) * (parseInt(it.qty) || 1))}
+                    </span>
+                    <button onClick={() => removeItem(it.id)} className="text-slate-400 hover:text-red-600 text-sm font-semibold" aria-label={`Remove ${it.name}`}>✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
+            <div className="text-sm font-semibold text-slate-700 mb-3">Add custom item</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <input
+                className="rounded-lg border border-slate-300 px-3 py-2 bg-white text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Item name (deck, fence, shed…)"
+                value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              />
+              <input
+                className="rounded-lg border border-slate-300 px-3 py-2 bg-white text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Description (optional)"
+                value={draft.desc}
+                onChange={(e) => setDraft({ ...draft, desc: e.target.value })}
+              />
+              <input
+                type="number" inputMode="numeric" min="1"
+                className="rounded-lg border border-slate-300 px-3 py-2 bg-white text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Qty (optional, default 1)"
+                value={draft.qty}
+                onChange={(e) => setDraft({ ...draft, qty: e.target.value })}
+              />
+              <input
+                type="number" inputMode="decimal" min="0"
+                className="rounded-lg border border-slate-300 px-3 py-2 bg-white text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Price per unit ($)"
+                value={draft.price}
+                onChange={(e) => setDraft({ ...draft, price: e.target.value })}
+              />
+            </div>
+            <button
+              onClick={addCustomItem}
+              disabled={!draft.name || !draft.price}
+              className="mt-3 w-full sm:w-auto px-5 py-2.5 rounded-lg bg-slate-900 text-white font-semibold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-800"
+            >
+              Add to estimate
+            </button>
+          </div>
+        </Section>
+
+        <Section
+          eyebrow="History"
+          title="Recent estimates"
+          right={
+            history.length > 0 && (
+              <button onClick={clearHistory} className="text-xs font-semibold text-slate-500 hover:text-red-600">
+                Clear history
+              </button>
+            )
+          }
+        >
+          {history.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              Nothing saved yet. Generate an estimate, open the breakdown, and tap "Save to history." The last 10 stick around on this device.
+            </p>
+          ) : (
+            <div className="grid gap-2">
+              {history.map((h) => (
+                <div key={h.id} className="flex items-center justify-between rounded-lg bg-white border border-slate-300 px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-800 truncate">{h.name}</div>
+                    <div className="text-xs text-slate-500 truncate">
+                      {h.date} · {Number(h.wallSqft).toLocaleString()} sq ft · {h.stories} story · {h.gallons} gal {h.paintName}
+                      {h.address ? ` · ${h.address}` : ""}
+                    </div>
+                  </div>
+                  <div className="font-mono font-bold text-slate-900 shrink-0 ml-3">{fmt(h.total)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Section>
+      </main>
+
+      <div className="fixed bottom-0 inset-x-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 pb-4">
+          <div className="rounded-2xl bg-slate-900 text-white shadow-2xl overflow-hidden">
+            {calc && breakdownOpen && (
+              <div className="px-5 pt-4 pb-2 text-sm border-b border-slate-700 font-mono">
+                <Row label={`Body — ${Number(wallSqft).toLocaleString()} sq ft × $${PREP_RATES.find(p=>p.id===prep).rate.toFixed(2)}`} value={fmtCents(calc.body)} />
+                <Row label={`Trim — ${Number(trimLf).toLocaleString()} lf × $${TRIM_RATE.toFixed(2)}`} value={fmtCents(calc.trimTotal)} />
+                {calc.adjPct > 0 && <Row label={`${stories}-story adjustment (+${calc.adjPct * 100}%)`} value={fmtCents(calc.storyAdj)} />}
+                {calc.paintUpgrade > 0 && <Row label={`Paint upgrade — ${calc.selectedPaint.name}`} value={fmtCents(calc.paintUpgrade)} />}
+                {calc.doors > 0 && <Row label={`Exterior doors × ${parseInt(doorQty)}`} value={fmtCents(calc.doors)} />}
+                {calc.customTotal > 0 && <Row label={`Custom add-ons (${customItems.length})`} value={fmtCents(calc.customTotal)} />}
+                <div className="grid grid-cols-2 gap-2 mt-2 mb-1">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); copyCustomerSummary(); }}
+                    className={`py-2.5 rounded-lg font-sans font-semibold text-sm transition-colors ${
+                      copiedCustomer ? "bg-green-600 text-white" : "bg-blue-600 hover:bg-blue-500 text-white"
+                    }`}
+                  >
+                    {copiedCustomer ? "Copied ✓" : "Customer copy"}
+                    <div className={`text-xs font-normal ${copiedCustomer ? "text-green-100" : "text-blue-200"}`}>
+                      {copiedCustomer ? "safe for proposals" : "totals only — no rates"}
+                    </div>
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); copySummary(); }}
+                    className={`py-2.5 rounded-lg font-sans font-semibold text-sm transition-colors border ${
+                      copied ? "bg-green-600 border-green-600 text-white" : "bg-transparent border-slate-600 hover:border-slate-400 text-slate-200"
+                    }`}
+                  >
+                    {copied ? "Copied ✓" : "Internal copy"}
+                    <div className={`text-xs font-normal ${copied ? "text-green-100" : "text-slate-400"}`}>
+                      {copied ? "keep this one internal" : "full math — never send"}
+                    </div>
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); saveEstimate(); }}
+                    className={`col-span-2 py-2.5 rounded-lg font-sans font-semibold text-sm transition-colors ${
+                      saved ? "bg-green-600 text-white" : "bg-slate-700 hover:bg-slate-600 text-white"
+                    }`}
+                  >
+                    {saved ? "Saved to history" : "Save to history"}
+                  </button>
+                </div>
+              </div>
+            )}
+            <button
+              onClick={() => calc && setBreakdownOpen(!breakdownOpen)}
+              className="w-full px-5 py-4 flex items-center justify-between text-left"
+            >
+              {calc ? (
+                <React.Fragment>
+                  <div>
+                    <div className="text-xs uppercase tracking-widest text-blue-400 font-semibold">
+                      Estimate total {breakdownOpen ? "· tap to close" : "· tap for breakdown"}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      {customer.job || customer.address || "Unnamed job"} · {calc.totalGallons} gal · {stories} story
+                    </div>
+                  </div>
+                  <div className="text-3xl font-bold font-mono">{fmt(calc.grandTotal)}</div>
+                </React.Fragment>
+              ) : (
+                <div className="w-full">
+                  <div className="text-xs uppercase tracking-widest text-amber-400 font-semibold">Estimate pending</div>
+                  <div className="text-sm text-slate-300 mt-0.5">Still needed: {missingFields.join(", ")}</div>
+                </div>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<CoverProEstimator />);
+</script>
+</body>
+</html>
